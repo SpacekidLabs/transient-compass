@@ -70,9 +70,10 @@ private:
     int ringWriteIndex = 0;
     int ringSamplesFilled = 0;
     int samplesSinceLastAnalysis = 0;
-    int transientPulseSamplesRemaining = 0;
-    int transientPulseLengthSamples = 768;
     double currentSampleRate = 48000.0;
+    float fastFollower = 0.0f;
+    float slowFollower = 0.0f;
+    float transientEnvelope = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TransientCompassAudioProcessor)
 };

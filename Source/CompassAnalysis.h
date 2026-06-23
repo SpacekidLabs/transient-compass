@@ -61,7 +61,7 @@ private:
     float computeSpectralEntropy (const std::vector<float>& mag) const;
     float computeSpectralFlatness (const std::vector<float>& mag) const;
     float computeZCR (const float* frame, int numSamples) const;
-    std::pair<float, float> computeACFFeatures (const std::vector<float>& acf) const;
+    std::pair<float, float> computeACFFeatures (const std::vector<float>& acf, double effectiveSampleRate) const;
     float computeCrestFactor (const float* frame, int numSamples, float rms) const;
     float computeSpectralRolloff (const std::vector<float>& mag) const;
     float computeHoyerSparsity (const std::vector<float>& mag) const;
@@ -74,8 +74,8 @@ private:
 
     double sampleRate = 48000.0;
     int maxFrameSize = 4096;
-    int currentFFTSize = 2048;
-    int currentWindowSize = 2048;
+    int currentFFTSize = 1024;
+    int currentWindowSize = 1024;
 
     int framesSeen = 0;
     int refractoryCounter = 0;

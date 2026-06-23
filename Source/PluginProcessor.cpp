@@ -3,9 +3,9 @@
 
 namespace
 {
-static constexpr int kRingBufferSize = 8192;
-static constexpr int kAnalysisHopSamples = 256;
-static constexpr int kWarmupFrames = 4;
+static constexpr int kRingBufferSize = 4096;
+static constexpr int kAnalysisHopSamples = 1024;
+static constexpr int kWarmupFrames = 2;
 
 static float dbToGain (float db)
 {
@@ -80,15 +80,16 @@ void TransientCompassAudioProcessor::prepareToPlay (double sampleRate, int sampl
 {
     juce::ignoreUnused (samplesPerBlock);
     currentSampleRate = sampleRate;
-    analysisEngine.prepare (sampleRate, 4096);
+    analysisEngine.prepare (sampleRate, 2048);
     analysisEngine.reset();
 
     std::fill (inputRingBuffer.begin(), inputRingBuffer.end(), 0.0f);
     ringWriteIndex = 0;
     ringSamplesFilled = 0;
     samplesSinceLastAnalysis = 0;
-    transientPulseSamplesRemaining = 0;
-    transientPulseLengthSamples = juce::jmax (1, (int) std::round (*apvts.getRawParameterValue ("shapeMs") * currentSampleRate * 0.001));
+    fastFollower = 0.0f;
+    slowFollower = 0.0f;
+    transientEnvelope = 0.0f;
 
     latestScore.store (0.0f);
     latestConfidence.store (0.0f);
@@ -100,8 +101,8 @@ void TransientCompassAudioProcessor::prepareToPlay (double sampleRate, int sampl
     latestZ2.store (0.0f);
     latestTransientPulse.store (0.0f);
     latestRegionIndex.store (0);
-    latestRecommendedWindow.store (2048);
-    latestAnalysisWindow.store (2048);
+    latestRecommendedWindow.store (1024);
+    latestAnalysisWindow.store (1024);
     latestPrimaryRepresentationIndex.store (0);
     latestEventCount.store (0);
     latestShaperDrive.store (0.0f);
@@ -131,7 +132,7 @@ int TransientCompassAudioProcessor::choiceToWindowSize (int choiceIndex)
         case 2: return 1024;
         case 3: return 2048;
         case 4: return 4096;
-        default: return 2048;
+        default: return 1024;
     }
 }
 
@@ -151,7 +152,7 @@ void TransientCompassAudioProcessor::analyseLatestFrame()
 
     int analysisWindow = choiceToWindowSize (analysisWindowChoice);
     if (analysisWindowChoice == 0)
-        analysisWindow = adaptiveWindow ? latestRecommendedWindow.load() : 2048;
+        analysisWindow = adaptiveWindow ? latestRecommendedWindow.load() : 1024;
 
     analysisWindow = juce::jlimit (512, (int) inputRingBuffer.size(), analysisWindow);
     latestAnalysisWindow.store (analysisWindow);
@@ -195,14 +196,12 @@ void TransientCompassAudioProcessor::analyseLatestFrame()
     if (result.isTransient)
     {
         latestEventCount.fetch_add (1);
-        transientPulseLengthSamples = juce::jmax (1, (int) std::round (*apvts.getRawParameterValue ("shapeMs") * currentSampleRate * 0.001));
-        transientPulseSamplesRemaining = transientPulseLengthSamples;
-        latestShaperDrive.store (juce::jlimit (0.0f, 1.0f, 0.35f + 0.65f * result.score));
-        latestTransientPulse.store (latestShaperDrive.load());
+        latestShaperDrive.store (juce::jlimit (0.0f, 1.0f, result.score));
+        latestTransientPulse.store (juce::jlimit (0.0f, 1.0f, result.score));
     }
     else
     {
-        latestShaperDrive.store (juce::jlimit (0.0f, 1.0f, latestShaperDrive.load() * 0.985f));
+        latestShaperDrive.store (juce::jlimit (0.0f, 1.0f, latestShaperDrive.load() * 0.97f));
         latestTransientPulse.store (juce::jlimit (0.0f, 1.0f, latestTransientPulse.load() * 0.96f));
     }
 
@@ -215,24 +214,38 @@ void TransientCompassAudioProcessor::applyTransientShaping (juce::AudioBuffer<fl
     const float attackBoostDb = *apvts.getRawParameterValue ("attackBoostDb");
     const float sustainCutDb = *apvts.getRawParameterValue ("sustainCutDb");
     const float outputGainDb = *apvts.getRawParameterValue ("outputGainDb");
+    const float shapeMs = *apvts.getRawParameterValue ("shapeMs");
+    const float sensitivity = *apvts.getRawParameterValue ("threshold");
 
     const float outputGain = dbToGain (outputGainDb);
-    const float drive = latestShaperDrive.load();
     const int numChannels = buffer.getNumChannels();
+    const float fastAttack = std::exp (-1.0f / (currentSampleRate * 0.0008f));
+    const float fastRelease = std::exp (-1.0f / (currentSampleRate * 0.020f));
+    const float slowAttack = std::exp (-1.0f / (currentSampleRate * 0.008f));
+    const float slowRelease = std::exp (-1.0f / (currentSampleRate * 0.120f));
+    const float envSmoothing = std::exp (-1.0f / (currentSampleRate * std::max (0.002f, shapeMs * 0.001f)));
 
     for (int i = 0; i < numSamples; ++i)
     {
-        float gain = 1.0f;
-        if (transientPulseSamplesRemaining > 0 && transientPulseLengthSamples > 0)
-        {
-            const float env = (float) transientPulseSamplesRemaining / (float) transientPulseLengthSamples;
-            const float shapedDb = drive * (attackBoostDb * env - sustainCutDb * (1.0f - env));
-            gain = dbToGain (shapedDb);
-            --transientPulseSamplesRemaining;
-        }
+        float mono = 0.0f;
+        for (int channel = 0; channel < numChannels; ++channel)
+            mono += buffer.getReadPointer (channel)[(size_t) startSample + (size_t) i];
+        mono /= (float) numChannels;
 
-        const float wetGain = gain * outputGain;
+        const float rect = std::abs (mono);
+        fastFollower += (rect > fastFollower ? (1.0f - fastAttack) : (1.0f - fastRelease)) * (rect - fastFollower);
+        slowFollower += (rect > slowFollower ? (1.0f - slowAttack) : (1.0f - slowRelease)) * (rect - slowFollower);
+
+        const float contrast = juce::jlimit (0.0f, 1.0f, (fastFollower - slowFollower) * (4.0f + 4.0f * sensitivity));
+        const float analysisBias = latestShaperDrive.load();
+        const float targetEnvelope = juce::jlimit (0.0f, 1.0f, juce::jmax (contrast, analysisBias * 0.75f));
+        transientEnvelope += (1.0f - envSmoothing) * (targetEnvelope - transientEnvelope);
+
+        const float attackGainDb = attackBoostDb * transientEnvelope;
+        const float sustainGainDb = -sustainCutDb * (1.0f - transientEnvelope);
+        const float wetGain = dbToGain (attackGainDb + sustainGainDb) * outputGain;
         const float dryGain = outputGain;
+
         for (int channel = 0; channel < numChannels; ++channel)
         {
             auto* channelData = buffer.getWritePointer (channel);
@@ -241,6 +254,8 @@ void TransientCompassAudioProcessor::applyTransientShaping (juce::AudioBuffer<fl
             channelData[(size_t) startSample + (size_t) i] = juce::jlimit (-2.0f, 2.0f, dry * (1.0f - mix) * dryGain + wet * mix);
         }
     }
+
+    latestTransientPulse.store (juce::jlimit (0.0f, 1.0f, transientEnvelope));
 }
 
 void TransientCompassAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
@@ -256,9 +271,6 @@ void TransientCompassAudioProcessor::processBlock (juce::AudioBuffer<float>& buf
     const int numSamples = buffer.getNumSamples();
     if (totalNumInputChannels == 0 || numSamples <= 0)
         return;
-
-    if (transientPulseLengthSamples <= 0)
-        transientPulseLengthSamples = juce::jmax (1, (int) std::round (*apvts.getRawParameterValue ("shapeMs") * currentSampleRate * 0.001));
 
     for (int sample = 0; sample < numSamples; ++sample)
     {

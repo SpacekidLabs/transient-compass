@@ -63,7 +63,7 @@ int CompassAnalysisEngine::nextPowerOfTwo (int value)
     int p = 1;
     while (p < value)
         p <<= 1;
-    return jlimit (64, 4096, p);
+    return jlimit (64, 2048, p);
 }
 
 float CompassAnalysisEngine::computeHannWindow (int n, int i)
@@ -113,7 +113,7 @@ void CompassAnalysisEngine::reset()
     previousACFPeriodicity = 0.0f;
     previousCepstrumPeak = 0.0f;
     previousRms = 0.0f;
-    currentWindowSize = 2048;
+    currentWindowSize = 1024;
     ensureFFTSize (currentWindowSize);
 }
 
@@ -159,12 +159,31 @@ std::vector<float> CompassAnalysisEngine::computeMagnitudeSpectrum (const float*
 
 std::vector<float> CompassAnalysisEngine::computeACF (const float* samples, int numSamples) const
 {
-    std::vector<float> acf ((size_t) numSamples, 0.0f);
-    for (int lag = 0; lag < numSamples; ++lag)
+    const int proxySize = juce::jlimit (128, 512, numSamples / 4);
+    const int stride = juce::jmax (1, numSamples / proxySize);
+    std::vector<float> proxy ((size_t) proxySize, 0.0f);
+
+    for (int i = 0; i < proxySize; ++i)
+    {
+        const int start = i * stride;
+        const int end = juce::jmin (numSamples, start + stride);
+        float sum = 0.0f;
+        int count = 0;
+        for (int j = start; j < end; ++j)
+        {
+            sum += samples[j];
+            ++count;
+        }
+
+        proxy[(size_t) i] = count > 0 ? sum / (float) count : 0.0f;
+    }
+
+    std::vector<float> acf ((size_t) proxySize, 0.0f);
+    for (int lag = 0; lag < proxySize; ++lag)
     {
         float sum = 0.0f;
-        for (int i = 0; i < numSamples - lag; ++i)
-            sum += samples[i] * samples[i + lag];
+        for (int i = 0; i < proxySize - lag; ++i)
+            sum += proxy[(size_t) i] * proxy[(size_t) (i + lag)];
         acf[(size_t) lag] = sum;
     }
 
@@ -259,10 +278,10 @@ float CompassAnalysisEngine::computeZCR (const float* frame, int numSamples) con
     return (sumDiff / (numSamples - 1)) / 2.0f;
 }
 
-std::pair<float, float> CompassAnalysisEngine::computeACFFeatures (const std::vector<float>& acf) const
+std::pair<float, float> CompassAnalysisEngine::computeACFFeatures (const std::vector<float>& acf, double effectiveSampleRate) const
 {
-    const int minLag = juce::jmax (1, (int) std::floor (sampleRate / 1000.0));
-    int maxLag = juce::jmax (minLag + 1, (int) std::floor (sampleRate / 80.0));
+    const int minLag = juce::jmax (1, (int) std::floor (effectiveSampleRate / 1000.0));
+    int maxLag = juce::jmax (minLag + 1, (int) std::floor (effectiveSampleRate / 80.0));
     if (maxLag >= (int) acf.size())
         maxLag = (int) acf.size() - 1;
 
@@ -422,12 +441,12 @@ int CompassAnalysisEngine::chooseRecommendedWindow (CompassRegion region, bool a
 
     switch (region)
     {
-        case CompassRegion::NoiseCollapse:       return 4096;
-        case CompassRegion::TransientOverloaded: return 1024;
-        case CompassRegion::PeriodicHarmonic:    return 2048;
-        case CompassRegion::SmoothLowpass:       return 2048;
+        case CompassRegion::NoiseCollapse:       return 2048;
+        case CompassRegion::TransientOverloaded: return 512;
+        case CompassRegion::PeriodicHarmonic:    return 1024;
+        case CompassRegion::SmoothLowpass:       return 1024;
         case CompassRegion::TransitionZone:
-        default:                                 return 2048;
+        default:                                 return 1024;
     }
 }
 
@@ -451,7 +470,9 @@ CompassAnalysisResult CompassAnalysisEngine::analyseFrame (const float* samples,
     const float crestFactor = computeCrestFactor (samples, numSamples, rms);
     const float kurtosis = computeKurtosis (samples, numSamples, rms);
     const auto acf = computeACF (samples, numSamples);
-    const auto acfFeatures = computeACFFeatures (acf);
+    const int acfDownsampleFactor = juce::jmax (1, numSamples / juce::jmax (1, (int) acf.size()));
+    const double effectiveSampleRate = sampleRate / (double) acfDownsampleFactor;
+    const auto acfFeatures = computeACFFeatures (acf, effectiveSampleRate);
     const float harmonicRatio = acfFeatures.first;
     const float periodicity = acfFeatures.second;
     const auto magnitude = computeMagnitudeSpectrum (samples, numSamples);
