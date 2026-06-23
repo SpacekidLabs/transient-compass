@@ -1,66 +1,59 @@
-# Adaptive Transient Detector
+# Transient Compass
 
-This repo is a small standalone **tool** for finding transients in audio.
-It takes the lessons from the earlier project and turns them into one
-practical command-line utility.
+`Transient Compass` is a JUCE-based transient shaper for real DAW workflows.
+It analyzes a live mono mix using the framework we built in
+[`SpacekidLabs/representation-fragility-lab`](https://github.com/SpacekidLabs/representation-fragility-lab)
+and then shapes the audio in place so you can hear the result immediately.
 
-## What it does
+The effect is built around the same framework we developed in the lab:
 
-The tool watches audio frame by frame and blends three signals:
+- the original 10-descriptor representation space
+- the same PCA region map
+- the same safety assumptions for `stft`, `acf`, `cepstrum`, `cqt`, and `wavelet`
+- an adaptive transient score that drives the shaping envelope
 
-- `spectral flux` for fast attack motion
-- `ACF periodicity drop` for loss of stable harmonic structure
-- `cepstral disruption` for harmonic-shape change and noise-floor rise
+## What You Get
 
-Instead of trusting one representation all the time, it:
+- VST3, AU, and Standalone plugin targets
+- a live visual map of the current `(z1, z2)` state
+- region labels such as `transition_zone`, `periodic_harmonic`, and `transient_overloaded`
+- adjustable sensitivity, reset floor, shape time, attack boost, sustain cut, mix, and output gain
+- automatic or manual analysis window selection
+- a sound-first workflow for auditioning the detector directly on drums
 
-- measures confidence per branch
-- adapts fusion weights from the current signal state
-- switches analysis window size based on whether the frame looks transient,
-  stable, or ambiguous
+## Build
 
-## Quick start
+This repo expects a local JUCE checkout.
 
-```bash
-pip install -e .
-```
-
-Run it on a WAV file:
-
-```bash
-atd path/to/audio.wav
-```
-
-Or let it generate a built-in demo signal:
+Set `JUCE_DIR` if your JUCE folder is not at the default path:
 
 ```bash
-atd
+export JUCE_DIR=/path/to/JUCE
 ```
 
-The output lists the strongest transient frames with their score, confidence,
-and the window size the tool would choose next.
+Then configure and build with CMake:
 
-## Python use
-
-```python
-import numpy as np
-from adaptive_transient_detector import AdaptiveTransientDetector
-
-sr = 16000
-t = np.arange(sr) / sr
-audio = 0.2 * np.sin(2 * np.pi * 220 * t)
-audio[7000:7010] += 1.0  # simple transient
-
-detector = AdaptiveTransientDetector(sample_rate=sr)
-results = detector.detect(audio)
-
-best = max(results, key=lambda r: r.transient_score)
-print(best.sample_index, best.transient_score, best.recommended_window)
+```bash
+/Applications/CMake.app/Contents/bin/cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+/Applications/CMake.app/Contents/bin/cmake --build build --config Release --target TransientCompass
 ```
 
-## Design goals
+On macOS the build produces these bundles under `build/TransientCompass_artefacts/Release/`:
 
-- stay lightweight and easy to inspect
-- work in streaming or offline mode
-- keep the tool explainable, not just accurate
-- keep the first implementation small enough to iterate quickly
+- `VST3/TransientCompass.vst3`
+- `AU/TransientCompass.component`
+- `Standalone/TransientCompass.app`
+
+## UI
+
+The plugin UI shows:
+
+- the live PCA point on the original framework map
+- score and confidence meters
+- the current semantic region
+- the active primary representation
+- the recommended window size
+- the current shaper control values
+
+The visual panel is meant to make the detector explainable while still being
+usable in a DAW session.

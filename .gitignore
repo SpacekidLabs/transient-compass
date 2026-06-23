@@ -5,4 +5,10 @@ dist/
 build/
 *.egg-info/
 .DS_Store
-
+results/
+src/adaptive_transient_detector/__pycache__/
+tests/__pycache__/
+*.vst3
+*.component
+*.app
+TransientCompass_artefacts/
